@@ -42,8 +42,18 @@ impl RevocationRegistry {
             .unwrap_or(false)
     }
 
-    pub fn batch_revoke(_env: Env, _issuer: Address, _vc_hashes: Vec<BytesN<32>>) {
-        panic!("not yet implemented")
+    pub fn batch_revoke(env: Env, issuer: Address, vc_hashes: Vec<BytesN<32>>) {
+        issuer.require_auth();
+        for vc_hash in vc_hashes.iter() {
+            env.storage()
+                .persistent()
+                .set(&RevocationKey::Status(vc_hash.clone()), &true);
+            env.storage()
+                .persistent()
+                .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+        }
+        env.events()
+            .publish((symbol_short!("BatchRev"),), (issuer, vc_hashes.len()));
     }
 }
 
@@ -96,5 +106,27 @@ mod tests {
         let contract_id2 = env2.register_contract(None, RevocationRegistry);
         let client2 = RevocationRegistryClient::new(&env2, &contract_id2);
         client2.revoke(&issuer, &vc_hash);
+    }
+
+    #[test]
+    fn test_batch_revoke_five_hashes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let mut vc_hashes = Vec::new(&env);
+        for i in 0..5 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i as u8;
+            vc_hashes.push_back(BytesN::from_array(&env, &hash_arr));
+        }
+
+        client.batch_revoke(&issuer, &vc_hashes);
+
+        for vc_hash in vc_hashes.iter() {
+            assert!(client.is_revoked(&vc_hash));
+        }
     }
 }
