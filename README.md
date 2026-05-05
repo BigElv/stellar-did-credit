@@ -8,10 +8,16 @@ The protocol addresses a fundamental gap in global financial inclusion: roughly 
 
 | Component             | Status           |
 |-----------------------|------------------|
-| identity-oracle       | 🚧 In progress   |
+| identity-oracle       | ✅ Complete      |
 | credit-oracle         | 📋 Planned       |
 | revocation-registry   | 📋 Planned       |
 | TypeScript SDK        | 📋 Planned       |
 | CLI tool              | 📋 Planned       |
+
+## Running tests
+
+```bash
+cargo test --workspace
+```
 
 This project is in early development. See CONTRIBUTING.md.
