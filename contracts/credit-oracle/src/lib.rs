@@ -18,6 +18,8 @@ pub enum DataKey {
     RepaymentRecord(Address),
     /// Credit score for a user
     Score(Address),
+    /// Cached VC count for a user
+    VcCount(Address),
 }
 
 /// Credit score record with metadata
@@ -135,19 +137,72 @@ impl CreditOracle {
         env.storage().persistent().set(&DataKey::RepaymentRecord(subject), &record);
     }
 
+    /// Cache VC count for a subject (feeder-only)
+    pub fn set_vc_count(env: Env, feeder: Address, subject: Address, count: u32) {
+        feeder.require_auth();
+        if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+            panic!("feeder not registered");
+        }
+        env.storage().persistent().set(&DataKey::VcCount(subject), &count);
+    }
+
     /// Compute and store credit score for a user
-    pub fn compute_score(_env: Env, _user: Address) {
-        panic!("not implemented");
+    pub fn compute_score(env: Env, subject: Address) -> u32 {
+        let tx_stats: TxStats = env.storage().persistent()
+            .get(&DataKey::TxStats(subject.clone()))
+            .unwrap_or(TxStats { volume_30d: 0, tx_count_30d: 0, avg_counterparties: 0 });
+
+        let repayment: RepaymentRecord = env.storage().persistent()
+            .get(&DataKey::RepaymentRecord(subject.clone()))
+            .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
+
+        let vc_count: u32 = env.storage().persistent()
+            .get(&DataKey::VcCount(subject.clone()))
+            .unwrap_or(0u32);
+
+        let vc_score = (vc_count * 20).min(100);
+        let tx_score = ((tx_stats.volume_30d / 100_000_000i128) as u32).min(100);
+        let repay_score = if repayment.total_count == 0 {
+            0
+        } else {
+            (repayment.on_time_count * 10000 / repayment.total_count) / 100
+        };
+
+        let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
+        let composite = (vc_score * weights.vc_weight
+            + tx_score * weights.tx_weight
+            + repay_score * weights.repayment_weight)
+            / 100;
+
+        let score = (300 + composite * 550 / 100).clamp(300, 850);
+
+        env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
+            score,
+            last_updated: env.ledger().timestamp(),
+            vc_count,
+            repayment_rate: if repayment.total_count == 0 { 0 }
+                            else { repayment.on_time_count * 10000 / repayment.total_count },
+            tx_volume_30d: tx_stats.volume_30d,
+        });
+
+        score
     }
 
     /// Get credit score for a user
-    pub fn get_score(_env: Env, _user: Address) -> ScoreRecord {
-        panic!("not implemented");
+    pub fn get_score(env: Env, subject: Address) -> ScoreRecord {
+        env.storage().persistent()
+            .get(&DataKey::Score(subject))
+            .expect("score not computed")
     }
 
-    /// Update scoring weights
-    pub fn update_weights(_env: Env, _weights: ScoringWeights) {
-        panic!("not implemented");
+    /// Update scoring weights (must sum to 100)
+    pub fn update_weights(env: Env, weights: ScoringWeights) {
+        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
+            panic!("weights must sum to 100");
+        }
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        stored_admin.require_auth();
+        env.storage().instance().set(&DataKey::Config, &weights);
     }
 
     /// Get current scoring weights
@@ -265,6 +320,88 @@ mod tests {
         });
         let rate = record.on_time_count * 10000 / record.total_count;
         assert_eq!(rate, 8000);
+    }
+
+    #[test]
+    fn test_base_score_is_300() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let score = client.compute_score(&subject);
+        assert_eq!(score, 300);
+    }
+
+    #[test]
+    fn test_score_increases_with_repayments() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        for _ in 0..10 {
+            client.record_repayment(&lender, &subject, &1000, &true);
+        }
+
+        let score = client.compute_score(&subject);
+        assert!(score > 300);
+    }
+
+    #[test]
+    fn test_score_bounded_300_850() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        client.register_lender(&admin, &lender);
+
+        // max vc_count
+        client.set_vc_count(&feeder, &subject, &5);
+        // max tx volume
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 100_000_000_000i128,
+            tx_count_30d: 1000,
+            avg_counterparties: 100,
+        });
+        // 100% repayment
+        for _ in 0..100 {
+            client.record_repayment(&lender, &subject, &1000, &true);
+        }
+
+        let score = client.compute_score(&subject);
+        assert!(score >= 300);
+        assert!(score <= 850);
+    }
+
+    #[test]
+    #[should_panic(expected = "weights must sum to 100")]
+    fn test_weights_must_sum_to_100() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.update_weights(&ScoringWeights { vc_weight: 40, tx_weight: 40, repayment_weight: 40 });
     }
 }
 
