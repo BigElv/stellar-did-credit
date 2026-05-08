@@ -75,4 +75,74 @@ mod tests {
         // 13. Assert score <= 850
         assert!(score <= 850, "expected score <= 850, got {}", score);
     }
+
+    #[test]
+    fn test_revoked_vc_lowers_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Setup: register and initialize all 3 contracts
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let _revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        _revocation.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[99u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        let lender = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        credit.register_lender(&admin, &lender);
+        credit.register_feeder(&admin, &feeder);
+
+        // 1. Get initial score with vc_count = 1
+        credit.set_vc_count(&feeder, &subject, &1);
+        credit.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 500_000_000i128,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            },
+        );
+        for _ in 0..5 {
+            credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
+        }
+        let initial_score = credit.compute_score(&subject);
+        assert!(initial_score > 300);
+
+        // 2. Revoke the VC on identity-oracle
+        identity.mark_vc_revoked(&issuer, &subject, &vc_hash);
+
+        // 3. Assert is_verified returns false
+        assert!(!identity.is_verified(&subject));
+
+        // 4. Update vc_count to 0 and recompute score
+        credit.set_vc_count(&feeder, &subject, &0);
+        let new_score = credit.compute_score(&subject);
+
+        // 5. Assert new score < initial score
+        assert!(
+            new_score < initial_score,
+            "expected new_score ({}) < initial_score ({})",
+            new_score,
+            initial_score
+        );
+    }
 }
