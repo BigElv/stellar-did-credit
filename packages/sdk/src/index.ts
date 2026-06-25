@@ -29,18 +29,8 @@ export interface ProtocolConfig {
   revocationRegistryId: string;
   networkPassphrase: string;
   rpcUrl: string;
+  simAccount: string;
 }
-
-/** Thrown when a score has not been computed for the requested address. */
-export class ScoreNotComputedError extends Error {
-  constructor() {
-    super("Score has not been computed for this address. Call computeScore() first.");
-    this.name = "ScoreNotComputedError";
-  }
-}
-
-/** Zero-balance placeholder account used for read-only simulations. */
-const SIM_ACCOUNT = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
 
 export class StellarDIDCreditSDK {
   constructor(private config: ProtocolConfig) {}
@@ -202,7 +192,7 @@ export class StellarDIDCreditSDK {
 
     // 3. Build a read-only transaction — use a well-known funded account as the fee source
     //    for simulation; no actual submission occurs.
-    const sourceAccount = new Account(SIM_ACCOUNT, "0");
+    const sourceAccount = new Account(this.config.simAccount, "0");
     const tx = new TransactionBuilder(sourceAccount, {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
@@ -250,7 +240,7 @@ export class StellarDIDCreditSDK {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
-    const sourceAccount = new Account(SIM_ACCOUNT, "0");
+    const sourceAccount = new Account(this.config.simAccount, "0");
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
 
     const tx = new TransactionBuilder(sourceAccount, {
@@ -297,7 +287,7 @@ export class StellarDIDCreditSDK {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
-    const sourceAccount = new Account(SIM_ACCOUNT, "0");
+    const sourceAccount = new Account(this.config.simAccount, "0");
     const tx = new TransactionBuilder(sourceAccount, {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
